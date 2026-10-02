@@ -16,7 +16,7 @@
 
 MCP server exposing a Qdrant-backed memory palace — typed wings, rooms, and halls instead of a generic blob store.
 
-Cali's Rust daemon. Stdio or Streamable HTTP. No web UI, no auth, no drama.
+Cali's Rust daemon. Stdio or Streamable HTTP. No web UI, optional auth, no drama.
 
 ## What it is
 
@@ -121,6 +121,15 @@ All via environment variables:
 | `FASTEMBED_CACHE_DIR` | `~/.cache/fastembed` | only used by the `fastembed` backend |
 | `PALAZZO_USAGE_LOG` | `/var/lib/palazzo/usage.jsonl` | append-only JSONL backing `palace_gain` |
 | `PALAZZO_GAIN_ENABLED` | `1` | set to `0`/`false`/`no`/`off` to disable per-call recording |
+| `PALAZZO_MAX_INGEST_BYTES` | `67108864` (64 MiB) | body cap for `POST /ingest` (32 KB/item still enforced) |
+| `PALAZZO_LEGACY_SESSION_MODE` | `true` | Streamable HTTP: keep stateful sessions for legacy MCP clients (they open a `GET /mcp` SSE stream). `false` = sessionless |
+| `PALAZZO_AUTH` | `off` | `off` = no auth; `email` = built-in OAuth 2.1 server + per-write email attribution (see [Authentication](#authentication-optional)) |
+| `PALAZZO_AUTH_SIGNING_KEY` | — | required when `PALAZZO_AUTH=email`; ≥ 16 bytes (e.g. `openssl rand -base64 48`). Rotating it invalidates every live token |
+| `PALAZZO_AUTH_ISSUER` | _(derived from request)_ | public base URL used in OAuth discovery metadata, when behind a reverse proxy |
+| `PALAZZO_ALLOWED_EMAIL_DOMAINS` | _(empty = any)_ | comma-separated; logins outside these domains are rejected |
+| `PALAZZO_ACCESS_TTL_SECS` | `3600` | OAuth access-token lifetime |
+| `PALAZZO_REFRESH_TTL_SECS` | `7776000` (90 d) | OAuth refresh-token lifetime |
+| `PALAZZO_TOKEN_TTL_SECS` | `2592000` (30 d) | lifetime of static paste-tokens minted at `/whoami` |
 | `RUST_LOG` | `palazzo=info` | |
 
 Logging goes to **stderr only**. Stdout is the MCP transport — anything written there corrupts the JSON-RPC stream.
@@ -133,7 +142,7 @@ palazzo ships two backends behind mutually-exclusive cargo features. Pick one at
 
 | Feature | How it embeds | When to use |
 |---|---|---|
-| `fastembed` (default) | Local ONNX inference of `nomic-embed-text-v1.5-Q` (INT8 dynamic-quantised) via [`fastembed-rs`](https://github.com/Anush008/fastembed-rs) | You want palazzo fully self-contained — zero external services. Static binary, ~110 MB one-time model download into `FASTEMBED_CACHE_DIR`, ~1 GB resident. **This is what every deployed palazzo runs.** |
+| `fastembed` (default) | Local ONNX inference of `nomic-embed-text-v1.5-Q` (INT8 dynamic-quantised) via [`fastembed-rs`](https://github.com/Anush008/fastembed-rs) | You want palazzo fully self-contained — zero external services. Single binary (glibc ≥ 2.38 + libstdc++), ~110 MB one-time model download into `FASTEMBED_CACHE_DIR`, ~1 GB resident. **This is what every deployed palazzo runs.** |
 | `ollama` | HTTP calls to an Ollama server running `nomic-embed-text` | You already run Ollama on your LAN and prefer a tiny no-native-deps binary. Useful for dev rigs that don't want to pay the model-download / RSS cost. |
 
 Select the variant via cargo features (release archives publish both per-platform):
@@ -196,6 +205,19 @@ claude mcp add --transport http palazzo http://your-server:6334/mcp
 ```
 
 Bind address can also be set via `PALAZZO_BIND`. Default is `127.0.0.1:6334`.
+
+Sessions: by default the server keeps stateful MCP sessions (`PALAZZO_LEGACY_SESSION_MODE=true`) so older clients that open a standalone `GET /mcp` SSE stream keep working; current clients use the stateless path either way. Sessions are held in memory with no idle timeout, so a restart is the only time a client sees one `Session not found` — it re-initializes and carries on. Set `PALAZZO_LEGACY_SESSION_MODE=false` to run fully sessionless.
+
+### Authentication (optional)
+
+Off by default (`PALAZZO_AUTH=off`) — fine for a trusted LAN or homelab. Set `PALAZZO_AUTH=email` (plus `PALAZZO_AUTH_SIGNING_KEY`) for a shared, team instance:
+
+- **Built-in OAuth 2.1 authorization server** — RFC 9728 / RFC 8414 discovery, dynamic client registration, PKCE, access + refresh tokens. MCP clients that support it (e.g. Claude's *Authenticate* button) log in with no extra setup.
+- **Paste-token path** — `GET/POST /whoami` mints a static bearer token for clients that only take a header.
+- **Per-write attribution** — every stored memory gets an `author` field (the logged-in email), filterable in `palace_find`, `palace_taxonomy`, `GET /export` and `palace_delete_by_filter`.
+- `PALAZZO_ALLOWED_EMAIL_DOMAINS` restricts logins to your domains. `/mcp`, `/ingest`, `/find` and `/stats` require a token; `/health`, `/metrics`, `/export` and `/v1/*` stay open.
+
+> **This is attribution, not identity verification.** There is no email confirmation step: anyone who can reach the login page can claim any address in an allowed domain. It gives you provenance ("who wrote this memory") and keeps casual outsiders out — it is not a defence against a malicious insider. Put it behind a network you already control. Design notes: [`docs/auth-v1.md`](docs/auth-v1.md).
 
 ### Bulk ingest over HTTP (`POST /ingest`)
 
@@ -319,9 +341,23 @@ sudo systemctl enable --now palazzo
 
 The unit runs as a dedicated `palazzo` user, drops all needless privileges (`ProtectSystem=strict`, `MemoryDenyWriteExecute=true`, `RestrictNamespaces=true`, etc.), and persists the WAL at `/var/lib/palazzo/wal.jsonl`.
 
-If you expose the service beyond a trusted LAN, put a reverse proxy with TLS + auth (e.g. nginx + basic auth, or an identity-aware proxy) in front of `:6334`. There is no built-in authentication — palazzo assumes a trusted network.
+If you expose the service beyond a trusted LAN, put a TLS reverse proxy in front of `:6334` and either enable the built-in [authentication](#authentication-optional) (`PALAZZO_AUTH=email`) or an identity-aware proxy. With auth off (the default), palazzo assumes a trusted network.
 
 Pre-built release binaries are published on each tag at <https://github.com/calibrae/palazzo/releases>. The `palazzo-fastembed-<version>-x86_64-unknown-linux-gnu.tar.gz` artifact is the production target (glibc ≥ 2.38).
+
+### Container image for orchestrators (`Dockerfile.cloud`)
+
+A minimal, hardened image for Kubernetes and other orchestrators. It packages a **prebuilt** binary (`cargo build --release` → `target/release/palazzo`) instead of compiling inside Docker:
+
+```
+cargo build --release
+docker build -f Dockerfile.cloud -t palazzo:latest .
+```
+
+- **Runtime base:** Chainguard `glibc-dynamic` — glibc, libstdc++, libgcc_s and CA certificates only. No shell, no package manager, no curl; a vulnerability scan of the base comes back clean.
+- **Model baked in** at build time (a throwaway Debian stage runs `palazzo warm`), so the container needs no HuggingFace egress at runtime.
+- Runs as **uid/gid 1000**; state (WAL, usage log, model cache) under `/var/lib/palazzo` — mount a volume there and set `fsGroup: 1000`.
+- **No Docker `HEALTHCHECK`** (there is no curl inside). Use your orchestrator's HTTP probe on `GET /health` instead, e.g. Kubernetes `readinessProbe`/`livenessProbe` with `httpGet: {path: /health, port: 6334}`.
 
 ### Deploy with Docker Compose
 
@@ -393,7 +429,7 @@ Requires live Qdrant and (for the `ollama` backend) Ollama reachable at the conf
 
 ## Non-goals
 
-- **No multi-tenant auth.** Anyone reachable on the listener can read and write the palace. Put it behind a tailnet, a reverse proxy with auth, or a localhost-only bind. palazzo assumes a trusted network.
+- **Auth is attribution, not isolation.** With `PALAZZO_AUTH=off` (the default) anyone who can reach the listener can read and write the palace — use a localhost bind, a VPN, or a reverse proxy. With `PALAZZO_AUTH=email`, writes are attributed and logins domain-restricted, but every authenticated user still reads the whole palace (single shared collection, no per-user read isolation).
 - **No web UI.** Use the Qdrant dashboard for raw inspection; the MCP tools are the supported interface.
 - **No knowledge graph, no agent diaries, no LLM rerankers, no embedding-model swaps to a different architecture.** The palace stays a single 768-dim collection on nomic-embed-text. If you want any of those layers, [MemPalace](https://github.com/MemPalace/mempalace) is purpose-built for it.
 - **No automatic collection migrations across architecture changes.** Compatible variants of the same model (V15 ↔ V15Q) work in the same collection because the vector space is identical. A different architecture would invalidate the existing points and isn't supported.
