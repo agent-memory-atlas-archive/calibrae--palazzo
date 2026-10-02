@@ -1,7 +1,13 @@
 # syntax=docker/dockerfile:1
 
-# Multi-stage: stage 1 warms the fastembed model cache at image-build time
-# so the container needs no HuggingFace egress at runtime.
+# Two stages:
+#   1. model  — warms the fastembed model cache at image-build time so the
+#               container needs no HuggingFace egress at runtime. Build-only;
+#               never shipped, so its OS packages don't reach the final image.
+#   2. runtime — minimal glibc base (Chainguard glibc-dynamic: glibc, libstdc++,
+#               libgcc_s, CA certs; no shell, no package manager, no curl).
+#               The ONNX runtime fastembed bundles needs libstdc++/libgcc_s;
+#               TLS is rustls, so no OpenSSL is required.
 # Expects a prebuilt binary in the build context at: target/release/palazzo
 
 FROM debian:trixie-slim AS model
@@ -12,21 +18,15 @@ RUN apt-get update \
 
 COPY target/release/palazzo /usr/local/bin/palazzo
 
-ENV FASTEMBED_CACHE_DIR=/model-cache
+ENV FASTEMBED_CACHE_DIR=/out/var/lib/palazzo/fastembed-cache
 
-RUN palazzo warm
+RUN palazzo warm \
+ && chown -R 1000:1000 /out/var/lib/palazzo
 
-FROM debian:trixie-slim
-
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/* \
- && useradd --system --create-home --home-dir /var/lib/palazzo palazzo
+FROM cgr.dev/chainguard/glibc-dynamic:latest
 
 COPY target/release/palazzo /usr/local/bin/palazzo
-COPY --from=model /model-cache /var/lib/palazzo/fastembed-cache
-
-RUN chown -R palazzo:palazzo /var/lib/palazzo
+COPY --from=model --chown=1000:1000 /out/var/lib/palazzo /var/lib/palazzo
 
 ENV PALAZZO_BIND=0.0.0.0:6334 \
     QDRANT_URL=http://qdrant:6333 \
@@ -36,12 +36,12 @@ ENV PALAZZO_BIND=0.0.0.0:6334 \
     PALAZZO_USAGE_LOG=/var/lib/palazzo/usage.jsonl \
     RUST_LOG=palazzo=info
 
-USER palazzo
+USER 1000:1000
 WORKDIR /var/lib/palazzo
 EXPOSE 6334
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:6334/health || exit 1
+# No HEALTHCHECK: there is no curl/shell in this image, and Kubernetes uses its
+# own liveness/readiness probes (HTTP GET /health) rather than Docker's.
 
-ENTRYPOINT ["palazzo"]
+ENTRYPOINT ["/usr/local/bin/palazzo"]
 CMD ["serve"]

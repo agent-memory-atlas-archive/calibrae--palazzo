@@ -860,9 +860,9 @@ impl Palace {
         let time_field = match args.time_field.as_deref() {
             None | Some("timestamp") => "timestamp",
             Some("event_time") => "event_time",
-            Some(other) => anyhow::bail!(
-                "time_field must be \"timestamp\" or \"event_time\", got {other:?}"
-            ),
+            Some(other) => {
+                anyhow::bail!("time_field must be \"timestamp\" or \"event_time\", got {other:?}")
+            }
         };
         let limit = args.limit.unwrap_or(5).clamp(1, 20);
         let exclude_superseded_before = if args.include_superseded.unwrap_or(false) {
@@ -1530,10 +1530,10 @@ fn new_id() -> u64 {
         .unwrap_or(0) as u64;
     let floor = millis.max(1_000_000_000);
     let prev = NEXT_ID
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |p| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |p| {
             Some(p.saturating_add(1).max(floor))
         })
-        .expect("fetch_update closure always returns Some");
+        .expect("try_update closure always returns Some");
     prev.saturating_add(1).max(floor)
 }
 

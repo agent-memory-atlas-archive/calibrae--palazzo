@@ -7,6 +7,18 @@ lives in the git log.
 
 ## Unreleased
 
+- **chore: Rust 1.99 compatibility** — `AtomicU64::fetch_update` → `try_update` (deprecated in 1.99; CI builds with `-D warnings`).
+- **security: hardened container image** — `Dockerfile.cloud` runtime moves from `debian:trixie-slim`
+  to Chainguard `glibc-dynamic` (glibc, libstdc++, libgcc_s, CA certs; no shell, no package
+  manager, no curl). Trivy: 188 OS vulns → 0. The Docker `HEALTHCHECK` is dropped (no curl in the
+  image; Kubernetes uses its own HTTP probes on `/health`). Also `fastembed` now uses its rustls
+  features instead of native-tls and drops the unused `image-models` default, so the binary no
+  longer links OpenSSL (`libssl`/`libcrypto`) and the dependency tree shrinks 456 → 377 crates.
+- **fix(deps): clear `cargo audit` gate** — bump `h2` 0.4.13 → 0.4.19 (RUSTSEC-2026-0258,
+  unbounded empty DATA frames) and `rustls` 0.23.38 → 0.23.45 (RUSTSEC-2026-0285, TLS 1.3
+  handshake messages accepted across encryption levels; pulls `aws-lc-rs`/`aws-lc-sys` and
+  `rustls-webpki` forward). Also replaces yanked `chacha20` 0.10.0 → 0.10.2 and `der` 0.8.0 →
+  0.8.2. Lockfile-only; unblocks the CI security stage.
 - **feat: nullable `event_time` on stored memories + `time_field` selector on `palace_find`/`GET /find`** —
   `palace_store`/`palace_store_batch`/`POST /ingest` accept an optional `event_time`
   (RFC3339), the original time the underlying event happened (e.g. an email's Date
