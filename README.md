@@ -12,7 +12,7 @@
 </p>
 
 > [!WARNING]
-> **palazzo ships with NO authentication and NO TLS.** Anyone who can reach the HTTP port can read, store, supersede, and **hard-delete** anything in the palace. Bind to `127.0.0.1` (the default) for single-user setups, or put it behind a reverse proxy with TLS + auth (nginx, Caddy, an identity-aware proxy) **before** exposing the port anywhere off-host. Never expose `palazzo serve` directly to the public internet. `PALAZZO_ALLOWED_HOSTS` is a DNS-rebinding guard, *not* auth — don't mistake it for one.
+> **Auth is off and TLS is absent by default.** With `PALAZZO_AUTH=off`, anyone who can reach the HTTP port can read, store, supersede, and **hard-delete** anything in the palace. Bind to `127.0.0.1` (the default) for single-user setups; before exposing the port off-host, enable `PALAZZO_AUTH=email` (see [Authentication](#authentication-optional)) **and** put it behind a TLS-terminating reverse proxy. Even with auth on, every authenticated user reads the whole palace. `PALAZZO_ALLOWED_HOSTS` is a DNS-rebinding guard, *not* auth.
 
 MCP server exposing a Qdrant-backed memory palace — typed wings, rooms, and halls instead of a generic blob store.
 
@@ -28,7 +28,7 @@ A single-binary Rust MCP server that:
 - Detects near-duplicates before writing (cosine ≥ 0.95 + exact text match)
 - Keeps an append-only JSONL write-ahead log for every mutation
 
-It is intentionally opinionated. If you want a generic `(text, metadata)` store, use [`qdrant/mcp-server-qdrant`](https://github.com/qdrant/mcp-server-qdrant) — this project starts from that interface and replaces the untyped metadata with an enum-validated palace schema.
+It is intentionally opinionated. If you want a generic `(text, metadata)` store, use [`qdrant/mcp-server-qdrant`](https://github.com/qdrant/mcp-server-qdrant) — this project starts from that interface and replaces the untyped metadata with a structured palace schema (free-text `wing` / `room` / `hall` / `category` labels, validated and indexed).
 
 ## Inspiration and prior art
 
@@ -196,7 +196,7 @@ claude mcp add palazzo \
 palazzo serve --bind 0.0.0.0:6334
 ```
 
-Serves MCP over Streamable HTTP at `POST /mcp`. Useful when the binary lives on a server co-located with Qdrant + Ollama, and your laptop (or multiple clients) connect over the network.
+Serves MCP over Streamable HTTP at `POST /mcp`. Useful when the binary lives on a server co-located with Qdrant, and your laptop (or multiple clients) connect over the network.
 
 Register with Claude Code as a remote server:
 
@@ -421,7 +421,7 @@ Requires live Qdrant and (for the `ollama` backend) Ollama reachable at the conf
 
 ## Security notes
 
-- Stdio transport, single-user threat model. No network listener, no auth.
+- Stdio transport: single-user threat model, no network listener. `serve` (Streamable HTTP) binds `127.0.0.1` by default; auth is opt-in via `PALAZZO_AUTH=email` (attribution + domain allow-list, not per-user read isolation).
 - Dependencies audited with `cargo audit` on every build bump.
 - Every write goes through a WAL (`~/.palazzo/wal.jsonl` by default) with content previews truncated to 120 chars.
 - `OLLAMA_URL` and `QDRANT_URL` are environment-controlled — anyone who can set env vars on this binary can already execute code as you, so the SSRF surface is accepted.
